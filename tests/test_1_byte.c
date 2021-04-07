@@ -22,6 +22,7 @@ void *start_routine(void*tid){
     char read_msg[1000];
 
     assert(tls_read(0,1000, read_msg) == 0);
+    printf("%s %s\n", new_msg, read_msg);
     assert(strcmp(new_msg, read_msg) == 0);
     printf("thread exiting...\n\n");
     pthread_exit(NULL);
@@ -55,6 +56,7 @@ int main(int argc, char** argv) {
     printf("Main: Trying to read back the message...\n");
     ret = tls_read(0, 1000, read_msg);
     assert(ret == 0);
+    printf("%s %s\n", read_msg, o_msg);
     assert(strcmp(o_msg, read_msg) == 0);
 
     printf("Main: Trying to destroy my TLS...\n");

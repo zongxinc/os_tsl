@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <string.h>
 
+
 //written by Khoa Tran with some remnants of Tony's tests
 
 void *start_routine(void*tid){
@@ -53,5 +54,5 @@ int main(int argc, char** argv) {
     assert(ret == 0);
     printf("...Main: Destroy successful\n");
 
-    return (EXIT_SUCCESS);
+    return 0;
 }

@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
 /*
  * This is a good place to define any data structures you will use in this file.
  * For example:
@@ -29,7 +31,7 @@ typedef struct thread_local_storage
 } TLS;
 
 struct page {
- unsigned int address; /* start address of page */
+ void* address; /* start address of page */
  int ref_count; /* counter for shared pages */
 };
 
@@ -52,7 +54,7 @@ static struct tid_tls_pair tid_tls_pairs[MAX_THREAD_COUNT];
  */
 void tls_protect(struct page *p)
 {
- if (mprotect((void *) (intptr_t) p->address, page_size, PROT_NONE)) {
+ if (mprotect((void *) p->address, page_size, PROT_NONE)) {
  fprintf(stderr, "tls_protect: could not protect page\n");
  exit(1);
  }
@@ -60,7 +62,7 @@ void tls_protect(struct page *p)
 
 void tls_unprotect(struct page *p)
 {
- if (mprotect((void *) (intptr_t) p->address, page_size, PROT_READ|PROT_WRITE)) {
+ if (mprotect((void *) p->address, page_size, PROT_READ|PROT_WRITE)) {
  fprintf(stderr, "tls_unprotect: could not unprotect page\n");
  exit(1);
  }
@@ -70,12 +72,14 @@ void tls_unprotect(struct page *p)
  */ 
 void tls_handle_page_fault(int sig, siginfo_t *si, void *context)
 {
-	unsigned int p_fault = ((uintptr_t) si->si_addr) & ~(page_size - 1);
+	uintptr_t p_fault = ((uintptr_t) si->si_addr) & ~(page_size - 1);
 	for (int i = 0; i < MAX_THREAD_COUNT; i++)
 	{
+		printf("%d\n", i);
+
 		for (int j = 0; j < tid_tls_pairs[i].tls->page_num; j++)
 		{
-			if (tid_tls_pairs[i].tls->pages[j]->address == p_fault)
+			if (tid_tls_pairs[i].tls->pages[j]->address == (void *)p_fault)
 			{
 				// exit current threads
 				pthread_exit(0);
@@ -92,6 +96,12 @@ void tls_handle_page_fault(int sig, siginfo_t *si, void *context)
 
 void tls_init()//?????
 {
+	for (int i = 0; i < MAX_THREAD_COUNT; i++)
+	{
+		tid_tls_pairs[i].tid = 0;
+		// printf("%d %ld\n", i, tid_tls_pairs[i].tid);
+	}
+	printf("init all tid\n");
 	struct sigaction sigact;
 	// page_size = getpagesize();
 	/* Handle page faults (SIGSEGV, SIGBUS) */
@@ -103,134 +113,221 @@ void tls_init()//?????
 	sigaction(SIGSEGV, &sigact, NULL);
 }
 
-
+static bool is_first_call = true;
 
 int tls_create(unsigned int size)
 {
+	if (is_first_call)
+	{
+		is_first_call = false;
+		tls_init();
+	}
 	if (size == 0)
 		return -1;
-	if (tid_tls_pairs[pthread_self()].tls != NULL)
-		return -1;
-
+	// printf("%d\n", MAX_THREAD_COUNT);
+	for (int i = 0; i < MAX_THREAD_COUNT; i++)
+	{
+		// printf("%ld\n", tid_tls_pairs[i].tid);
+		if (tid_tls_pairs[i].tid == pthread_self())
+		{
+			return -1;
+		}
+	}
+	
 	TLS *myTLS;
 	myTLS = (TLS*)malloc(sizeof(TLS));
 
 	myTLS->tid = pthread_self();
 	myTLS->size = size;
 	myTLS->page_num = size/page_size + 1;
-	myTLS->pages = (struct page **)calloc(myTLS->page_num, page_size);
+	myTLS->pages = (struct page **)calloc(myTLS->page_num, sizeof(struct page *));
+
+	printf("page size %d\n", page_size);
+	printf("page_num:%d\n", myTLS->page_num);
 	for (int i = 0; i < myTLS->page_num; i++)
 	{
-		myTLS->pages[i]->address = (uintptr_t) mmap(0, page_size, PROT_NONE, MAP_ANON|MAP_PRIVATE, 0, 0);
+		// printf("%ld\n", (uintptr_t) mmap(0, page_size, PROT_NONE, MAP_ANON|MAP_PRIVATE, 0, 0));
+		myTLS->pages[i] = malloc(sizeof(struct page));
+		myTLS->pages[i]->address = mmap(0, page_size, PROT_NONE, MAP_ANON|MAP_PRIVATE, 0, 0);
 		myTLS->pages[i]->ref_count = 0;
 	}
-	tid_tls_pairs[pthread_self()].tls = myTLS;
-	tid_tls_pairs[pthread_self()].tid = pthread_self();
-	
-
-
-
+	for (int i = 0; i < MAX_THREAD_COUNT; i++)
+	{
+		if (tid_tls_pairs[i].tid == 0)
+		{
+			tid_tls_pairs[i].tls = myTLS;
+			tid_tls_pairs[i].tid = pthread_self();
+			break;
+		}
+	}
 	return 0;
 }
 
 int tls_destroy()
 {
-	if (tid_tls_pairs[pthread_self()].tls == NULL)
-		return -1;
-	for (int i = 0; i < tid_tls_pairs[pthread_self()].tls->page_num; i++)
+	int position = 0;
+
+	for (int i = 0; i < MAX_THREAD_COUNT; i++)
 	{
-		if (tid_tls_pairs[pthread_self()].tls->pages[i]->ref_count == 0)
+		if (tid_tls_pairs[i].tid == pthread_self())
 		{
-			free(tid_tls_pairs[pthread_self()].tls->pages[i]);
+			position = i;
+			break;
+		}
+		if (i == 127 && tid_tls_pairs[i].tid != pthread_self())
+		{
+			return -1;
+		}
+	}
+	if (tid_tls_pairs[position].tls == NULL)
+		return -1;
+	for (int i = 0; i < tid_tls_pairs[position].tls->page_num; i++)
+	{
+		if (tid_tls_pairs[position].tls->pages[i]->ref_count == 0)
+		{
+			free(tid_tls_pairs[position].tls->pages[i]);
 		} 
 		else
 		{
-			tid_tls_pairs[pthread_self()].tls->pages[i]->ref_count--;
-			// look up
+			tid_tls_pairs[position].tls->pages[i]->ref_count--;
 		}
 	}
-	free(tid_tls_pairs[pthread_self()].tls);
+
+	tid_tls_pairs[position].tid = 0;
+
+	free(tid_tls_pairs[position].tls);
 	// how to remove the (tid->tls) from global structure
 	return 0;
 }
 
 int tls_read(unsigned int offset, unsigned int length, char *buffer)
 {
-	if (tid_tls_pairs[pthread_self()].tls == NULL || offset + length > tid_tls_pairs[pthread_self()].tls->size)
-		return -1;
-	for (int i = 0; i < tid_tls_pairs[pthread_self()].tls->page_num; i++)
+	int position = 0;
+	for (int i = 0; i < MAX_THREAD_COUNT; i++)
 	{
-		tls_unprotect(tid_tls_pairs[pthread_self()].tls->pages[i]);
+		if (tid_tls_pairs[i].tid == pthread_self())
+		{
+			position = i;
+			break;
+		}
+		if (i == 127 && tid_tls_pairs[i].tid != pthread_self())
+		{
+			return -1;
+		}
+	}
+	if (tid_tls_pairs[position].tls == NULL || offset + length > tid_tls_pairs[position].tls->size)
+		return -1;
+	for (int i = 0; i < tid_tls_pairs[position].tls->page_num; i++)
+	{
+		tls_unprotect(tid_tls_pairs[position].tls->pages[i]);
 	}
 
 	for (int count = 0, idx = offset; idx < (offset + length); count++, idx++)
 	{
 		int pageNum = idx/page_size;
 		int pageOffset = idx%page_size;
-		buffer[count] = *(tid_tls_pairs[pthread_self()].tls->pages[pageNum]->address + pageOffset);
+		buffer[count] = *((char*)tid_tls_pairs[position].tls->pages[pageNum]->address + pageOffset);
 	}
 
-	for (int i = 0; i < tid_tls_pairs[pthread_self()].tls->page_num; i++)
+	for (int i = 0; i < tid_tls_pairs[position].tls->page_num; i++)
 	{
-		tls_protect(tid_tls_pairs[pthread_self()].tls->pages[i]);
+		tls_protect(tid_tls_pairs[position].tls->pages[i]);
 	}
 	return 0;
 }
 
 int tls_write(unsigned int offset, unsigned int length, const char *buffer)
 {
-	if (tid_tls_pairs[pthread_self()].tls == NULL || offset + length > tid_tls_pairs[pthread_self()].tls->size)
-		return -1;
-	for (int i = 0; i < tid_tls_pairs[pthread_self()].tls->page_num; i++)
+	int position = 0;
+	for (int i = 0; i < MAX_THREAD_COUNT; i++)
 	{
-		tls_unprotect(tid_tls_pairs[pthread_self()].tls->pages[i]);
+		if (tid_tls_pairs[i].tid == pthread_self())
+		{
+			position = i;
+			break;
+		}
+		if (i == 127 && tid_tls_pairs[i].tid != pthread_self())
+		{
+			return -1;
+		}
+	}
+	if (tid_tls_pairs[position].tls == NULL || offset + length > tid_tls_pairs[position].tls->size)
+		return -1;
+	for (int i = 0; i < tid_tls_pairs[position].tls->page_num; i++)
+	{
+		tls_unprotect(tid_tls_pairs[position].tls->pages[i]);
 	}
 
 	for (int count = 0, idx = offset; idx < (offset + length); count++, idx++)
 	{
 		int pageNum = idx/page_size;
 		int pageOffset = idx%page_size;
-		if (tid_tls_pairs[pthread_self()].tls->pages[pageNum]->ref_count > 0)
+		if (tid_tls_pairs[position].tls->pages[pageNum]->ref_count > 0)
 		{
-			tid_tls_pairs[pthread_self()].tls->pages[pageNum]->ref_count--;
-			tls_protect(tid_tls_pairs[pthread_self()].tls->pages[pageNum]);
-			struct page* copy = (struct page*) calloc(1, sizeof(struct page));
-			copy->address = (uintptr_t)mmap(0, page_size, PROT_WRITE, MAP_ANON|MAP_PRIVATE, 0, 0);
+			printf("%s %d\n", "ref", tid_tls_pairs[position].tls->pages[pageNum]->ref_count);
+			tid_tls_pairs[position].tls->pages[pageNum]->ref_count--;
+			// tls_protect(tid_tls_pairs[position].tls->pages[pageNum]);
+			struct page* copy = malloc(sizeof(struct page));
+			copy->address = mmap(0, page_size, PROT_WRITE, MAP_ANON|MAP_PRIVATE, 0, 0);
+			memcpy(copy->address, tid_tls_pairs[position].tls->pages[pageNum]->address, page_size);
 			copy->ref_count = 0;
+			tls_protect(tid_tls_pairs[position].tls->pages[pageNum]);
 			// what about the data in the old page
 
-			tid_tls_pairs[pthread_self()].tls->pages[pageNum] = copy;
+			tid_tls_pairs[position].tls->pages[pageNum] = copy;
 
 		}
 
-		*(tid_tls_pairs[pthread_self()].tls->pages[pageNum]->address + pageOffset) = buffer[count];
+		*((char *)tid_tls_pairs[position].tls->pages[pageNum]->address + pageOffset) = buffer[count];
 
 	}
 
-	for (int i = 0; i < tid_tls_pairs[pthread_self()].tls->page_num; i++)
+
+	for (int i = 0; i < tid_tls_pairs[position].tls->page_num; i++)
 	{
-		tls_protect(tid_tls_pairs[pthread_self()].tls->pages[i]);
+		tls_protect(tid_tls_pairs[position].tls->pages[i]);
 	}
 	return 0;
 }
 
 int tls_clone(pthread_t tid)
 {
-	if (tid_tls_pairs[pthread_self()].tls != NULL || tid_tls_pairs[tid].tls == NULL)
+	int position = 0;
+	int target = 0;
+	for (int i = 0; i < MAX_THREAD_COUNT; i++)
+	{
+		if (tid_tls_pairs[i].tid == 0)
+		{
+			position = i;
+			break;
+		}
+	}
+	for (int i = 0; i < MAX_THREAD_COUNT; i++)
+	{
+		if (tid_tls_pairs[i].tid == tid)
+		{
+			target = i;
+			break;
+		}
+	}
+	if (tid_tls_pairs[position].tls != NULL || tid_tls_pairs[target].tls == NULL)
 		return -1;
 	TLS *myTLS;
 	myTLS = (TLS*)malloc(sizeof(TLS));
 	myTLS->tid = pthread_self();
-	myTLS->size = tid_tls_pairs[tid].tls->size;
-	myTLS->page_num = tid_tls_pairs[tid].tls->size/page_size + 1;
-
+	myTLS->size = tid_tls_pairs[target].tls->size;
+	myTLS->page_num = tid_tls_pairs[target].tls->size/page_size + 1;
+	myTLS->pages = (struct page **)calloc(myTLS->page_num, sizeof(struct page *));
 	for (int i = 0; i < myTLS->page_num; i++)
 	{
-		tid_tls_pairs[tid].tls->pages[i]->ref_count++;
-		myTLS->pages[i]->address = tid_tls_pairs[tid].tls->pages[i]->address;
+		tid_tls_pairs[target].tls->pages[i]->ref_count++;
+		myTLS->pages[i] = malloc(sizeof(struct page));
+		// myTLS->pages[i]->address = tid_tls_pairs[target].tls->pages[i]->address;
+		myTLS->pages[i]= tid_tls_pairs[target].tls->pages[i];
+		printf("%s %d\n", "new", myTLS->pages[i]->ref_count);
 	}
 
-	tid_tls_pairs[pthread_self()].tls = myTLS;
-	tid_tls_pairs[pthread_self()].tid = pthread_self();
+	tid_tls_pairs[position].tls = myTLS;
+	tid_tls_pairs[position].tid = pthread_self();
 	return 0;
 }
